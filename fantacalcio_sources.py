@@ -20,6 +20,36 @@ TEAM_NAMES = {
     "CREMONESE", "PISA", "VERONA",
 }
 
+# Hint espliciti per la rosa dell'utente, stagione 2026/27. Servono a evitare
+# errori dovuti all'ordine del testo nelle pagine delle probabili formazioni.
+ROSTER_TEAM_HINTS = {
+    "MAIGNAN": "Milan",
+    "TERRACCIANO": "Milan",
+    "TORRIANI": "Milan",
+    "MOLINA": "Roma",
+    "MIRANDA": "Bologna",
+    "HAPS": "Venezia",
+    "LULLI": "Roma",
+    "CAMBIASO": "Juventus",
+    "BADIASHILE": "Napoli",
+    "BELGHALI": "Torino",
+    "MAZZOCCHI": "Venezia",
+    "ORSOLINI": "Bologna",
+    "MASTANTUONO": "Fiorentina",
+    "CONCEICAO": "Juventus",
+    "KESSIE": "Atalanta",
+    "CALO": "Frosinone",
+    "ROMANO": "Cagliari",
+    "FITZ JIM": "Torino",
+    "DOUGLAS LUIZ": "Juventus",
+    "PINAMONTI": "Sassuolo",
+    "SCAMACCA": "Atalanta",
+    "PIO ESPOSITO": "Inter",
+    "GEUBBELS": "Lecce",
+    "LUCCA": "Napoli",
+    "BONNY": "Inter",
+}
+
 
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "")
@@ -29,7 +59,7 @@ def norm(s: str) -> str:
 
 
 def _fetch_lines(url: str) -> list[str]:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.1; personal-use)"}
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.2; personal-use)"}
     r = requests.get(url, headers=headers, timeout=15)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -93,12 +123,15 @@ def fetch_probable_percentages(roster_names: list[str]) -> ProbableSource:
         out, matched, teams = {}, {}, {}
         for name in roster_names:
             key, score = _best_name_match(name, raw)
+            nk = norm(name)
             if key and score >= 72:
-                nk = norm(name)
                 out[nk] = raw[key]
                 matched[nk] = key
-                if raw_team.get(key):
-                    teams[nk] = raw_team[key]
+            # Per la squadra preferiamo sempre l'hint esplicito della rosa.
+            if ROSTER_TEAM_HINTS.get(nk):
+                teams[nk] = ROSTER_TEAM_HINTS[nk]
+            elif key and raw_team.get(key):
+                teams[nk] = raw_team[key]
 
         stamps = re.findall(
             r"Ultimo aggiornamento\s+(\d{2}/\d{2}/\d{4}\s*-\s*\d{2}:\d{2})",
@@ -117,7 +150,9 @@ def fetch_probable_percentages(roster_names: list[str]) -> ProbableSource:
 
         return ProbableSource(out, matched, teams, updated, True)
     except Exception as exc:
-        return ProbableSource({}, {}, {}, "", False, str(exc))
+        # Anche se Fantacalcio.it non risponde, manteniamo gli hint squadra.
+        teams = {norm(n): ROSTER_TEAM_HINTS[norm(n)] for n in roster_names if norm(n) in ROSTER_TEAM_HINTS}
+        return ProbableSource({}, {}, teams, "", False, str(exc))
 
 
 @dataclass
