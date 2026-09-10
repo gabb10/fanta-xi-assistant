@@ -60,6 +60,7 @@ def recent_summary(matches: list[dict[str, Any]] | None):
     mins = sum(f(x.get("minutes")) for x in matches)
     starts = sum(1 for x in matches if x.get("starter"))
     n = len(matches)
+    # Non è xG: proxy trasparente di pericolosità recente.
     threat = clamp(35 + 7 * (shots_on / n) + 15 * (goals / n) + 9 * (assists / n) + 2 * (key / n))
     return {
         "matches": n,
@@ -170,6 +171,8 @@ def evaluate_player(
     else:
         model_p = 50
 
+    # Consenso multi-fonte. Solo Fantacalcio può fornire una % editoriale vera;
+    # per Gazzetta/Sky usiamo stime interne derivate dallo stato (XI/panchina/dubbio).
     estimates = [{"source": "Modello statistiche", "estimate": model_p, "weight": 0.24}]
     if probable_pct is not None:
         estimates.append({"source": "Fantacalcio.it", "estimate": probable_pct, "weight": 0.36})
@@ -213,6 +216,8 @@ def evaluate_player(
     if not recent["matches"] and apps:
         threat = clamp(38 + ((season_goals + season_assists) / apps) * 130)
 
+    # xG/xA reali, se inseriti dall'utente/fonte esterna, migliorano l'upside.
+    advanced = None
     if xg90 is not None or xa90 is not None:
         advanced = clamp(35 + 62 * f(xg90) + 48 * f(xa90))
         threat = 0.55 * threat + 0.45 * advanced
@@ -261,6 +266,7 @@ def evaluate_player(
         p_starter = 5
 
     role = role.upper()
+    # Senza modificatore difesa: peso maggiore all'upside offensivo di C/A.
     if role == "P":
         score = .69*p_starter + .10*form_score + .21*fixture_score
     elif role == "D":
@@ -323,7 +329,10 @@ def evaluate_player(
 
     if manual_note:
         reasons.append(manual_note.strip())
-    if resolve_confidence < 75:
+    # Mostra l'avviso di abbinamento solo se l'API ha effettivamente trovato
+    # un giocatore ma con somiglianza bassa. Se l'API e' fallita/non ha risposto,
+    # non confondiamo un errore tecnico con un possibile omonimo.
+    if api_player_id is not None and resolve_confidence < 75:
         reasons.append("verificare abbinamento API")
 
     if official_status != "unknown":
