@@ -1,4 +1,4 @@
-# Fanta XI Assistant V3 — Multi-source
+# Fanta XI Assistant V3.1 — Multi-source
 
 Web app Streamlit ottimizzata per iPhone/iPad e desktop, pensata per una lega Fantacalcio Classic a 10 senza modificatore difesa.
 
@@ -8,13 +8,26 @@ Web app Streamlit ottimizzata per iPhone/iPad e desktop, pensata per una lega Fa
 - legge notizie recenti da più testate tramite Google News RSS;
 - distingue formazione ufficiale, probabili, ballottaggi, panchina e indisponibilità;
 - calcola `% titolare`, `% schierabilità`, consenso tra fonti e confidenza;
-- considera forma, matchup, ultime 5, rigori/piazzati e pericolosità offensiva;
+- considera forma, matchup, rigori/piazzati e, opzionalmente, ultime 5 avanzate;
 - confronta i moduli Classic e propone XI + panchina;
 - segnala quando le fonti sono molto discordanti.
 
+## Novità V3.1
+
+La V3.1 è ottimizzata per il piano Free di API-Football:
+
+- risolve giocatore + statistiche stagionali con una sola richiesta quando possibile;
+- recupera le prossime partite per campionato, invece di fare una richiesta per ogni squadra;
+- legge i rate-limit restituiti da API-Football e rallenta automaticamente prima di superarli;
+- conserva le risposte in cache per ridurre le richieste dei successivi aggiornamenti;
+- mostra chiamate di rete, cache hit, quota giornaliera, quota al minuto e secondi di attesa;
+- sostituisce il generico `dati API parziali` con diagnostica più utile nella scheda Fonti;
+- corregge il contatore dei segnali includendo anche Fantacalcio.it;
+- lascia `Matchup API` e `Ultime 5 avanzate` disattivati di default per non consumare inutilmente il piano Free.
+
 ## Fonti
 
-- API-Football: fixture, statistiche, infortuni, lineup ufficiali, prediction.
+- API-Football: fixture, statistiche, infortuni, lineup ufficiali e prediction opzionali.
 - Fantacalcio.it: percentuali probabili e gerarchie rigoristi/piazzati.
 - La Gazzetta dello Sport: probabili formazioni e ballottaggi.
 - Sky Sport: probabili, riserve, dubbi, squalificati e indisponibili.
@@ -30,18 +43,15 @@ La formazione ufficiale prevale sempre sugli altri segnali.
 
 ## Deploy su Streamlit Community Cloud
 
-1. Fai merge della PR `streamlit-v3` su `main`.
-2. Apri Streamlit Community Cloud e crea una nuova app.
-3. Repository: `gabb10/fanta-xi-assistant`.
-4. Branch: `main`.
-5. Main file path: `app.py`.
-6. Nei Secrets inserisci:
+1. Repository: `gabb10/fanta-xi-assistant`.
+2. Branch: `main`.
+3. Main file path: `app.py`.
+4. Nei Secrets inserisci:
 
 ```toml
 API_FOOTBALL_KEY = "LA_TUA_CHIAVE"
 ```
 
-7. Apri il link `.streamlit.app` da Safari su iPhone/iPad.
-8. Usa **Condividi → Aggiungi a Home**.
+Quando `main` viene aggiornato, Streamlit Community Cloud normalmente rileva il nuovo commit e ridistribuisce l'app collegata al repository.
 
 Non inserire mai la chiave API nel repository pubblico.
