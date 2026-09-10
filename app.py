@@ -6,12 +6,13 @@ from pathlib import Path
 
 import streamlit as st
 
-# Compatibility layer V3.3.3
+# Compatibility layer V3.3.4
 # - API-Football Free nel 2026 non espone le statistiche season=2026.
 # - Gli ID giocatore vengono quindi risolti tramite /players/profiles (senza stagione).
 # - Il calendario Serie A usa Fantacalcio.it come fonte primaria.
 # - Avversario/casa-trasferta vengono ricavati anche dal nome squadra.
-# - Il 3-4-3 è prioritario quando tutti gli 11 hanno >=70% di probabilità voto.
+# - Il modulo mostrato e' SEMPRE 3-4-3; se un altro modulo e' sensibilmente piu sicuro,
+#   l'app lo consiglia separatamente spiegando chi entra, chi esce e perche'.
 import api_football
 import competition_context
 import fantasy_engine
@@ -85,7 +86,7 @@ api_football.APIFootball.player_stats = _player_profile_free
 
 # ---------------------------------------------------------------------------
 # Calendario: sul piano Free evitiamo /fixtures?league=135&season=2026,
-# che viene bloccato dalla limitazione stagionale. Fantacalcio.it contiene già
+# che viene bloccato dalla limitazione stagionale. Fantacalcio.it contiene gia'
 # le 10 partite della giornata con giorno e orario.
 # ---------------------------------------------------------------------------
 def _serie_a_schedule_free(api, season: int, count: int = 30):
@@ -145,19 +146,18 @@ fantasy_engine.evaluate_player = _evaluate_player_schedule_safe
 
 
 # ---------------------------------------------------------------------------
-# Preferenza 3-4-3: se gli 11 selezionati hanno tutti almeno 70% di probabilità
-# di voto e nessuno è indisponibile, il 3-4-3 viene scelto a prescindere dal
-# piccolo vantaggio numerico di altri moduli.
+# Modulo: XI SEMPRE in 3-4-3.
+# In parallelo calcoliamo il miglior modulo alternativo con il vecchio motore.
+# Se l'alternativa aumenta davvero la sicurezza voto, mostriamo un consiglio,
+# ma NON cambiamo automaticamente l'XI principale.
 # ---------------------------------------------------------------------------
 _original_best_lineup = fantasy_engine.best_lineup
-PREFERRED_343_VOTE_FLOOR = 70.0
 
 
-def _safe_343(players):
-    needs = fantasy_engine.FORMATIONS["3-4-3"]
-    chosen = []
+def _pick_formation(players, formation: str):
+    needs = fantasy_engine.FORMATIONS[formation]
     selector = getattr(fantasy_engine, "_selection_value", lambda p: p.schierabilita)
-
+    chosen = []
     for role, n in needs.items():
         pool = sorted(
             [p for p in players if p.role == role],
@@ -168,36 +168,79 @@ def _safe_343(players):
             return None
         chosen.extend(pool[:n])
 
-    if any(p.p_vote < PREFERRED_343_VOTE_FLOOR or bool(p.unavailable) for p in chosen):
-        return None
-
     raw_total = sum(p.schierabilita for p in chosen)
     selection_total = sum(selector(p) for p in chosen)
     vote_floor = min(p.p_vote for p in chosen)
+    expected_votes = sum(p.p_vote for p in chosen) / 100.0
     return {
-        "formation": "3-4-3",
+        "formation": formation,
         "players": chosen,
         "total": raw_total,
-        "optimizer_score": selection_total + 1000.0,
+        "optimizer_score": selection_total,
         "vote_floor": vote_floor,
-        "preferred": True,
+        "expected_votes": expected_votes,
     }
 
 
-def _best_lineup_343_first(players):
-    preferred = _safe_343(players)
-    if preferred is not None:
-        return preferred
-    return _original_best_lineup(players)
+def _player_diff(base_players, alt_players):
+    base = {p.name: p for p in base_players}
+    alt = {p.name: p for p in alt_players}
+    out_players = [p for name, p in base.items() if name not in alt]
+    in_players = [p for name, p in alt.items() if name not in base]
+    return out_players, in_players
 
 
-fantasy_engine.best_lineup = _best_lineup_343_first
+def _fmt_players(players):
+    if not players:
+        return "—"
+    return ", ".join(f"{p.name.title()} ({p.role}, voto {p.p_vote:.0f}%)" for p in players)
+
+
+def _best_lineup_343_always(players):
+    base = _pick_formation(players, "3-4-3")
+    if base is None:
+        # Caso teorico: rosa incompleta. Solo qui lasciamo decidere al motore standard.
+        return _original_best_lineup(players)
+
+    alt = _original_best_lineup(players)
+    if alt and alt.get("formation") != "3-4-3":
+        alt_players = alt.get("players", [])
+        alt_expected = sum(p.p_vote for p in alt_players) / 100.0 if alt_players else 0.0
+        alt_floor = min((p.p_vote for p in alt_players), default=0.0)
+        base_expected = base["expected_votes"]
+        base_floor = base["vote_floor"]
+        gain_expected = alt_expected - base_expected
+        gain_floor = alt_floor - base_floor
+        out_players, in_players = _player_diff(base["players"], alt_players)
+
+        # Suggeriamo un cambio solo se c'e' un vantaggio di sicurezza percepibile:
+        # almeno +0.25 voti attesi nell'XI, oppure +12 punti sul giocatore piu' a rischio.
+        if gain_expected >= 0.25 or gain_floor >= 12:
+            reasons = []
+            if gain_expected >= 0.25:
+                reasons.append(f"circa {gain_expected:.2f} voti attesi in piu' sull'XI")
+            if gain_floor >= 12:
+                reasons.append(
+                    f"il giocatore piu' a rischio passa da {base_floor:.0f}% a {alt_floor:.0f}% di probabilita' voto"
+                )
+            st.warning(
+                f"💡 **Consiglio modulo: valuta {alt['formation']}**\n\n"
+                f"**Esce:** {_fmt_players(out_players)}  \n"
+                f"**Entra:** {_fmt_players(in_players)}  \n"
+                f"**Perche':** " + "; ".join(reasons) + ".  \n\n"
+                f"La formazione principale resta comunque **3-4-3**, come richiesto."
+            )
+
+    return base
+
+
+fantasy_engine.best_lineup = _best_lineup_343_always
 
 APP = Path(__file__).resolve().with_name("app_v33.py")
 
 try:
     runpy.run_path(str(APP), run_name="__main__")
 except Exception as exc:
-    st.error("L'app non è riuscita ad avviarsi correttamente.")
+    st.error("L'app non e' riuscita ad avviarsi correttamente.")
     st.code(f"{type(exc).__name__}: {exc}")
     st.caption("Apri Manage app per i log completi. La chiave API non viene mostrata qui.")
