@@ -4,6 +4,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, asdict
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urljoin
 
@@ -42,6 +43,11 @@ POSITIVE = [
     "dal 1'", "dal primo minuto", "rientra", "rientro", "disponibile",
     "in gruppo", "si allena con il gruppo",
 ]
+
+ITALIAN_MONTHS = {
+    "gen": 1, "feb": 2, "mar": 3, "apr": 4, "mag": 5, "giu": 6,
+    "lug": 7, "ago": 8, "set": 9, "ott": 10, "nov": 11, "dic": 12,
+}
 
 
 def norm(s: str) -> str:
@@ -123,7 +129,7 @@ class MultiSource:
         self.cache = TinyDiskCache(cache_dir)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.0; personal-use)"
+            "User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.2; personal-use)"
         })
 
     def _get(self, url: str, ttl: int = 900) -> str:
@@ -216,13 +222,36 @@ class MultiSource:
             return n.lower().replace(" ", "-")
         return None
 
+    @staticmethod
+    def _sky_page_is_current(html: str) -> bool:
+        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True).lower()
+        dates = []
+        for d, m, y in re.findall(r"\b(\d{1,2})\s+(gen|feb|mar|apr|mag|giu|lug|ago|set|ott|nov|dic)\s+(\d{4})\b", text):
+            try:
+                dates.append(date(int(y), ITALIAN_MONTHS[m], int(d)))
+            except ValueError:
+                pass
+        for d, m, y in re.findall(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text):
+            try:
+                dates.append(date(int(y), int(m), int(d)))
+            except ValueError:
+                pass
+        if not dates:
+            return True
+        # Se TUTTE le partite presenti nella pagina sono già passate, la pagina
+        # è riferita alla giornata precedente e non deve pesare nel consenso.
+        return max(dates) >= date.today()
+
     def sky_team_page(self, team: str):
         slug = self._sky_team_slug(team)
         if not slug:
             return None, None
         url = SKY_TEAM_URL.format(slug=slug)
         try:
-            return self._get(url, ttl=900), url
+            html = self._get(url, ttl=900)
+            if not self._sky_page_is_current(html):
+                return None, None
+            return html, url
         except Exception:
             return None, None
 
