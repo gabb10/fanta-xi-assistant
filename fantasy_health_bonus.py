@@ -12,7 +12,7 @@ from rapidfuzz import fuzz
 UNAVAILABLE_URL = "https://www.fantacalcio.it/serie-a/indisponibili"
 INJURED_URL = "https://www.fantacalcio.it/infortunati-serie-a"
 STATS_URL = "https://www.fantacalcio.it/statistiche-serie-a/2026-27/fantacalcio/riepilogo"
-STANDINGS_URL = "https://www.fantacalcio.it/serie-a/calendario/27"
+STANDINGS_URL = "https://www.fantacalcio.it/serie-a"
 
 TEAM_NAMES = {
     "ATALANTA", "BOLOGNA", "CAGLIARI", "COMO", "CREMONESE", "FIORENTINA",
@@ -40,7 +40,7 @@ def norm(value: str) -> str:
 def _get_html(url: str) -> str:
     r = requests.get(
         url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.4.1; personal-use)"},
+        headers={"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.4.2; personal-use)"},
         timeout=18,
     )
     r.raise_for_status()
@@ -181,12 +181,7 @@ def fetch_current_stats(roster_names: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def fetch_team_table() -> dict[str, dict[str, float]]:
-    """Classifica live: G, Pt, GF, GS.
-
-    Usata solo per il contesto matchup. Il parser cerca una riga contenente una
-    squadra Serie A e poi usa la sequenza numerica standard Pt, G, V, P, S, GF,
-    GS, DR. Se la pagina cambia struttura restituisce semplicemente un dict vuoto.
-    """
+    """Classifica live Fantacalcio.it: Pt, G, GF e GS."""
     out: dict[str, dict[str, float]] = {}
     try:
         soup = BeautifulSoup(_get_html(STANDINGS_URL), "html.parser")
@@ -222,7 +217,6 @@ def fetch_team_table() -> dict[str, dict[str, float]]:
         if len(nums) < 7:
             continue
 
-        # Standard Fantacalcio: Pt, G, V, P, S, GF, GS, DR
         pt, games, wins, draws, losses, gf, gs = nums[:7]
         if games <= 0 or games > 38 or gf < 0 or gs < 0:
             continue
@@ -237,10 +231,11 @@ def fetch_team_table() -> dict[str, dict[str, float]]:
 
 def matchup_context(team: str, opponent: str, home_away: str,
                     table: dict[str, dict[str, float]] | None):
-    """Ritorna score matchup 0-100 e moltiplicatore prudente circa 0.82-1.20.
+    """Score matchup 0-100 e fattore 0.78-1.24.
 
-    Considera capacita' realizzativa della squadra, gol subiti dall'avversario e
-    casa/trasferta. I dati iniziali vengono fortemente shrinkati verso la media.
+    Pesa forza offensiva della squadra, vulnerabilita' dell'avversario,
+    forza generale dell'avversario e casa/trasferta. A inizio stagione i dati
+    sono shrinkati verso la media per evitare estremi dopo poche partite.
     """
     table = table or {}
     t = table.get(norm(team))
@@ -249,8 +244,8 @@ def matchup_context(team: str, opponent: str, home_away: str,
     away = norm(home_away) == "TRASFERTA"
 
     if not t or not o:
-        score = 54.0 if home else 46.0 if away else 50.0
-        factor = 1.04 if home else 0.96 if away else 1.0
+        score = 58.0 if home else 42.0 if away else 50.0
+        factor = 1.08 if home else 0.92 if away else 1.0
         return score, factor, "solo fattore casa/trasferta"
 
     rows = [x for x in table.values() if x.get("games", 0) > 0]
@@ -263,22 +258,22 @@ def matchup_context(team: str, opponent: str, home_away: str,
     raw_attack = (t["gf"] / tg) / league_gfpg
     raw_opp_generosity = (o["gs"] / og) / league_gfpg
 
-    # Con 3 giornate il peso dati e' 3/(3+6)=33%: molto prudente.
-    wt = tg / (tg + 6.0)
-    wo = og / (og + 6.0)
+    # Dopo 3 giornate il dato pesa ~43%: abbastanza da distinguere i matchup,
+    # ma ancora lontano dal dominare il modello.
+    wt = tg / (tg + 4.0)
+    wo = og / (og + 4.0)
     attack = 1.0 + (raw_attack - 1.0) * wt
     generosity = 1.0 + (raw_opp_generosity - 1.0) * wo
 
-    # La difficolta' generale dell'avversario entra debolmente tramite punti/partita.
     all_ppg = [x["points"] / max(1.0, x["games"]) for x in rows]
     avg_ppg = sum(all_ppg) / len(all_ppg) if all_ppg else 1.35
     opp_ppg = o["points"] / og
-    strength_penalty = max(-0.08, min(0.08, (opp_ppg - avg_ppg) * 0.035))
+    strength_penalty = max(-0.10, min(0.10, (opp_ppg - avg_ppg) * 0.05))
 
-    loc = 1.07 if home else 0.93 if away else 1.0
-    raw_factor = (0.50 * attack + 0.50 * generosity) * loc * (1.0 - strength_penalty)
-    factor = max(0.82, min(1.20, raw_factor))
-    score = max(0.0, min(100.0, 50.0 + (factor - 1.0) * 220.0))
+    loc = 1.08 if home else 0.92 if away else 1.0
+    raw_factor = (0.52 * attack + 0.48 * generosity) * loc * (1.0 - strength_penalty)
+    factor = max(0.78, min(1.24, raw_factor))
+    score = max(0.0, min(100.0, 50.0 + (factor - 1.0) * 200.0))
 
     note = (
         f"GF squadra {t['gf']:.0f}/{t['games']:.0f}, "
@@ -328,9 +323,8 @@ def bonus_potential(role: str, stats: dict[str, Any] | None, set_piece: dict[str
     elif set_rank == 3:
         score += 2
 
-    # Il contesto della singola partita pesa soprattutto sui giocatori da bonus.
     if matchup_score is not None and role != "P":
-        sensitivity = {"D": 0.18, "C": 0.32, "A": 0.45}.get(role, 0.25)
+        sensitivity = {"D": 0.20, "C": 0.40, "A": 0.70}.get(role, 0.28)
         score += (float(matchup_score) - 50.0) * sensitivity
 
     return max(0.0, min(100.0, score))
@@ -351,7 +345,16 @@ def bonus_note(score: float, stats: dict[str, Any] | None, set_piece: dict[str, 
     if set_piece.get("set_piece_rank") == 1:
         bits.append("1° sui piazzati")
     if matchup_score is not None:
-        label = "molto favorevole" if matchup_score >= 68 else "favorevole" if matchup_score >= 57 else "difficile" if matchup_score <= 43 else "molto difficile" if matchup_score <= 32 else "neutro"
+        if matchup_score <= 32:
+            label = "molto difficile"
+        elif matchup_score <= 43:
+            label = "difficile"
+        elif matchup_score >= 68:
+            label = "molto favorevole"
+        elif matchup_score >= 57:
+            label = "favorevole"
+        else:
+            label = "neutro"
         bits.append(f"matchup {label} {matchup_score:.0f}/100")
         if matchup_note:
             bits.append(matchup_note)
