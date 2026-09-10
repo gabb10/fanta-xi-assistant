@@ -84,6 +84,9 @@ class APIFootball:
         self.last_error = ""
         self._request_times: deque[float] = deque()
         self._safe_minute_cap = 9
+        self._resolved_rows: dict[tuple[int, int], dict[str, Any]] = {}
+        self._team_leagues: dict[int, int] = {}
+        self._league_fixture_maps: dict[tuple[int, int], dict[int, dict[str, Any] | None]] = {}
 
     def _update_rate_headers(self, r: requests.Response):
         def as_int(name: str):
@@ -196,14 +199,38 @@ class APIFootball:
         return row, confidence
 
     def search_profile(self, query: str) -> tuple[dict[str, Any] | None, int]:
-        token = query.split()[-1]
-        result = self._get("/players/profiles", {"search": token}, ttl=30 * 86400)
-        row, confidence = self._best_player_match(query, result.response)
-        return ((row or {}).get("player") if row else None), confidence
+        season = datetime.now().year if datetime.now().month >= 7 else datetime.now().year - 1
+        row, confidence = self.resolve_player_with_stats(query, season)
+        if not row:
+            return None, 0
+        player = row.get("player") or {}
+        pid = player.get("id")
+        if pid:
+            self._resolved_rows[(int(pid), int(season))] = row
+            sb = self.best_stat_block(row)
+            if sb:
+                tid = (sb.get("team") or {}).get("id")
+                lid = (sb.get("league") or {}).get("id")
+                if tid and lid:
+                    self._team_leagues[int(tid)] = int(lid)
+        return player, confidence
 
     def player_stats(self, player_id: int, season: int):
+        key = (int(player_id), int(season))
+        if key in self._resolved_rows:
+            self.cache_hits += 1
+            return self._resolved_rows[key]
         res = self._get("/players", {"id": player_id, "season": season}, ttl=12 * 3600)
-        return res.response[0] if res.response else None
+        row = res.response[0] if res.response else None
+        if row:
+            self._resolved_rows[key] = row
+            sb = self.best_stat_block(row)
+            if sb:
+                tid = (sb.get("team") or {}).get("id")
+                lid = (sb.get("league") or {}).get("id")
+                if tid and lid:
+                    self._team_leagues[int(tid)] = int(lid)
+        return row
 
     @staticmethod
     def best_stat_block(player_row):
@@ -247,6 +274,28 @@ class APIFootball:
         return out
 
     def next_fixture(self, team_id: int):
+        team_id = int(team_id)
+        league_id = self._team_leagues.get(team_id)
+        season = datetime.now().year if datetime.now().month >= 7 else datetime.now().year - 1
+        if league_id:
+            cache_key = (league_id, season)
+            if cache_key not in self._league_fixture_maps:
+                try:
+                    fixtures = self.upcoming_fixtures_by_league([league_id], season, days=14)
+                    all_team_ids = set()
+                    for fx in fixtures:
+                        teams = fx.get("teams") or {}
+                        for side in ("home", "away"):
+                            tid = (teams.get(side) or {}).get("id")
+                            if tid:
+                                all_team_ids.add(int(tid))
+                    self._league_fixture_maps[cache_key] = self.map_next_fixture_by_team(fixtures, list(all_team_ids))
+                except Exception:
+                    self._league_fixture_maps[cache_key] = {}
+            cached_fx = self._league_fixture_maps[cache_key].get(team_id)
+            if cached_fx:
+                self.cache_hits += 1
+                return cached_fx
         res = self._get("/fixtures", {"team": team_id, "next": 1, "timezone": "Europe/Rome"}, ttl=30 * 60)
         return res.response[0] if res.response else None
 
