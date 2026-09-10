@@ -46,7 +46,7 @@ ROSTER_TEAM_HINTS = {
     "SCAMACCA": "Atalanta",
     "PIO ESPOSITO": "Inter",
     "GEUBBELS": "Lecce",
-    "LUCCA": "Napoli",
+    "MALDINI": "Cagliari",
     "BONNY": "Inter",
 }
 
