@@ -1,0 +1,10 @@
+{
+  "name": "Fanta XI Assistant",
+  "short_name": "Fanta XI",
+  "description": "Assistente per scegliere la formazione del Fantacalcio",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#08100b",
+  "theme_color": "#101a14",
+  "icons": [{ "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
