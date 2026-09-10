@@ -9,7 +9,15 @@ import streamlit as st
 import api_football
 import competition_context
 import fantasy_engine
-from fantasy_health_bonus import bonus_note, bonus_potential, fetch_current_stats, fetch_unavailable, norm
+from fantasy_health_bonus import (
+    bonus_note,
+    bonus_potential,
+    fetch_current_stats,
+    fetch_team_table,
+    fetch_unavailable,
+    matchup_context,
+    norm,
+)
 from schedule_fallback import fantacalcio_schedule
 
 BASE = Path(__file__).resolve().parent
@@ -40,11 +48,11 @@ def _roster_names() -> tuple[str, ...]:
 @st.cache_data(ttl=900, show_spinner=False)
 def _editorial_context(names: tuple[str, ...]):
     roster = list(names)
-    return fetch_unavailable(roster), fetch_current_stats(roster)
+    return fetch_unavailable(roster), fetch_current_stats(roster), fetch_team_table()
 
 
 ROSTER_NAMES = _roster_names()
-EDITORIAL_UNAVAILABLE, CURRENT_STATS = _editorial_context(ROSTER_NAMES)
+EDITORIAL_UNAVAILABLE, CURRENT_STATS, TEAM_TABLE = _editorial_context(ROSTER_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +118,7 @@ competition_context.team_id_from_fixture = _team_id_preserve_api
 
 
 # ---------------------------------------------------------------------------
-# Valutazione: calendario per nome + infortuni/squalifiche + bonus potential.
+# Valutazione: calendario per nome + infortuni/squalifiche + bonus + matchup.
 # ---------------------------------------------------------------------------
 _original_evaluate_player = fantasy_engine.evaluate_player
 
@@ -143,18 +151,28 @@ def _evaluate_player_v34(*args, **kwargs):
     key = norm(kwargs.get("name") or ev.name)
     stats = CURRENT_STATS.get(key, {})
     set_piece = kwargs.get("set_piece_role") or {}
-    bscore = bonus_potential(ev.role, stats, set_piece)
-    setattr(ev, "bonus_score", round(bscore, 1))
-    bnote = bonus_note(bscore, stats, set_piece)
 
-    # Il bonus incide di piu' sui ruoli offensivi. L'algoritmo originale contiene
-    # gia' una piccola quota threat/piazzati: qui aggiungiamo solo il delta utile.
-    bonus_weight = {"P": 0.02, "D": 0.10, "C": 0.18, "A": 0.22}.get(ev.role, 0.12)
+    # Matchup dinamico: forza offensiva squadra + vulnerabilita' difensiva avversario
+    # + casa/trasferta. A inizio stagione i dati vengono shrinkati verso la media.
+    mscore, mfactor, mnote = matchup_context(ev.team, ev.opponent, ev.home_away, TEAM_TABLE)
+    setattr(ev, "matchup_bonus_score", round(mscore, 1))
+    setattr(ev, "matchup_bonus_factor", round(mfactor, 3))
+
+    bscore = bonus_potential(ev.role, stats, set_piece, matchup_score=mscore)
+    setattr(ev, "bonus_score", round(bscore, 1))
+    bnote = bonus_note(bscore, stats, set_piece, matchup_score=mscore, matchup_note=mnote)
+
+    # Il bonus incide di piu' sui ruoli offensivi. Per gli attaccanti il matchup
+    # deve poter spostare davvero un ballottaggio, senza pero' ignorare il rischio SV.
+    bonus_weight = {"P": 0.02, "D": 0.10, "C": 0.19, "A": 0.25}.get(ev.role, 0.12)
     delta = (bscore - 50.0) * bonus_weight
     ev.schierabilita = round(fantasy_engine.clamp(ev.schierabilita + delta), 1)
     ev.label = fantasy_engine.status_label(ev.schierabilita)
     ev.reason = (ev.reason + "; " if ev.reason else "") + bnote
-    ev.source_detail = (ev.source_detail + " | " if ev.source_detail else "") + f"Bonus {bscore:.0f}/100"
+    ev.source_detail = (
+        (ev.source_detail + " | " if ev.source_detail else "")
+        + f"Bonus {bscore:.0f}/100 · Matchup {mscore:.0f}/100"
+    )
 
     # Infortunio/squalifica editoriale = veto forte, prevale su probabili e bonus.
     unavailable = EDITORIAL_UNAVAILABLE.get(key)
@@ -172,7 +190,10 @@ def _evaluate_player_v34(*args, **kwargs):
             ev.schierabilita = min(ev.schierabilita, 5.0)
         ev.label = "⛔ Da evitare"
         ev.reason = f"⛔ {status.upper()} — {reason}; " + ev.reason
-        ev.source_detail = (ev.source_detail + " | " if ev.source_detail else "") + f"Indisponibili Fantacalcio.it: {status}"
+        ev.source_detail = (
+            (ev.source_detail + " | " if ev.source_detail else "")
+            + f"Indisponibili Fantacalcio.it: {status}"
+        )
 
     return ev
 
@@ -193,7 +214,14 @@ def _pick_formation(players, formation: str):
     for role, n in needs.items():
         pool = sorted(
             [p for p in players if p.role == role],
-            key=lambda p: (selector(p), p.p_vote, getattr(p, "bonus_score", 50), p.schierabilita, p.p_starter),
+            key=lambda p: (
+                selector(p),
+                p.p_vote,
+                getattr(p, "bonus_score", 50),
+                getattr(p, "matchup_bonus_score", 50),
+                p.schierabilita,
+                p.p_starter,
+            ),
             reverse=True,
         )
         if len(pool) < n:
@@ -223,7 +251,7 @@ def _fmt_players(players):
     if not players:
         return "—"
     return ", ".join(
-        f"{p.name.title()} ({p.role}, voto {p.p_vote:.0f}%, bonus {getattr(p, 'bonus_score', 50):.0f}/100)"
+        f"{p.name.title()} ({p.role}, voto {p.p_vote:.0f}%, bonus {getattr(p, 'bonus_score', 50):.0f}/100, matchup {getattr(p, 'matchup_bonus_score', 50):.0f}/100)"
         for p in players
     )
 
