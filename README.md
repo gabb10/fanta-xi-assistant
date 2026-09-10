@@ -1,49 +1,47 @@
-# Fanta XI Assistant
+# Fanta XI Assistant V3 — Multi-source
 
-Web app/PWA per aiutare a scegliere la formazione migliore in un Fantacalcio a 10, senza modificatore difesa.
+Web app Streamlit ottimizzata per iPhone/iPad e desktop, pensata per una lega Fantacalcio Classic a 10 senza modificatore difesa.
 
-## Obiettivo
+## Cosa fa
 
-Il progetto è pensato per incrociare più segnali prima della giornata: probabili formazioni, indisponibili, squalifiche, stato di forma e notizie. L'algoritmo assegna un punteggio a ogni giocatore e confronta i moduli consentiti per proporre XI titolare e panchina.
+- incrocia API-Football, Fantacalcio.it, Gazzetta e Sky Sport;
+- legge notizie recenti da più testate tramite Google News RSS;
+- distingue formazione ufficiale, probabili, ballottaggi, panchina e indisponibilità;
+- calcola `% titolare`, `% schierabilità`, consenso tra fonti e confidenza;
+- considera forma, matchup, ultime 5, rigori/piazzati e pericolosità offensiva;
+- confronta i moduli Classic e propone XI + panchina;
+- segnala quando le fonti sono molto discordanti.
 
-## Stato attuale
+## Fonti
 
-Questa è la prima versione funzionante dello scaffold:
+- API-Football: fixture, statistiche, infortuni, lineup ufficiali, prediction.
+- Fantacalcio.it: percentuali probabili e gerarchie rigoristi/piazzati.
+- La Gazzetta dello Sport: probabili formazioni e ballottaggi.
+- Sky Sport: probabili, riserve, dubbi, squalificati e indisponibili.
+- News recenti: Sky, Gazzetta, Fantacalcio.it, Corriere dello Sport e Tuttomercatoweb.
 
-- React + Vite
-- layout responsive per iPhone/iPad/desktop
-- PWA installabile dalla Home
-- ottimizzatore dei moduli senza modificatore difesa
-- dati demo sostituibili con dati reali
-- workflow GitHub Pages
-- struttura pronta per aggiungere adapter multi-fonte
+Le fonti editoriali sono best-effort: se una testata modifica l'HTML o limita l'accesso automatico, il programma continua a funzionare usando le altre fonti disponibili.
 
-## Avvio locale
+## Regola fondamentale
 
-```bash
-npm install
-npm run dev
+Una percentuale pubblicata realmente da una fonte viene distinta da un segnale numerico interno. Per esempio, se Sky indica un giocatore nell'XI probabile ma non pubblica una percentuale, l'app converte quello stato in un valore interno solo per il calcolo del consenso, senza presentarlo come una percentuale ufficiale di Sky.
+
+La formazione ufficiale prevale sempre sugli altri segnali.
+
+## Deploy su Streamlit Community Cloud
+
+1. Fai merge della PR `streamlit-v3` su `main`.
+2. Apri Streamlit Community Cloud e crea una nuova app.
+3. Repository: `gabb10/fanta-xi-assistant`.
+4. Branch: `main`.
+5. Main file path: `app.py`.
+6. Nei Secrets inserisci:
+
+```toml
+API_FOOTBALL_KEY = "LA_TUA_CHIAVE"
 ```
 
-## Build
+7. Apri il link `.streamlit.app` da Safari su iPhone/iPad.
+8. Usa **Condividi → Aggiungi a Home**.
 
-```bash
-npm run build
-```
-
-## Pubblicazione
-
-Il workflow `.github/workflows/deploy-pages.yml` compila il progetto e pubblica `dist/` su GitHub Pages. Nelle impostazioni del repository abilita **Settings > Pages > Source: GitHub Actions**.
-
-## Dati reali
-
-I siti editoriali e di probabili formazioni hanno formati e condizioni d'uso differenti. Gli adapter reali vanno aggiunti in modo specifico per ogni fonte, preferendo API/RSS ufficiali quando disponibili. Il file `public/data/latest.json` definisce il formato dati usato dall'interfaccia.
-
-## Roadmap
-
-1. Inserimento/importazione della propria rosa.
-2. Adapter per più fonti e normalizzazione nomi giocatori.
-3. Titolarità e indisponibilità aggiornate automaticamente.
-4. News per giocatore con affidabilità della fonte.
-5. Punteggio predittivo più evoluto basato su avversario, forma e minutaggio.
-6. Notifiche pre-consegna formazione.
+Non inserire mai la chiave API nel repository pubblico.
