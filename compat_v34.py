@@ -62,24 +62,79 @@ def _profile_row(player: dict) -> dict:
     return {"player": player or {}, "statistics": []}
 
 
+PROFILE_SEARCH_ALIASES = {
+    # API-Football puo' essere sensibile al trattino nella ricerca. Manteniamo
+    # il nome della rosa invariato ma proviamo varianti equivalenti e verifichiamo
+    # comunque il candidato col fuzzy matching prima di accettarne l'ID.
+    "FITZ JIM": ["Kian Fitz-Jim", "Fitz-Jim", "Fitz Jim", "Fitz"],
+}
+
+
+def _profile_search_terms(query: str) -> list[str]:
+    q = (query or "").strip()
+    key = norm(q)
+    terms = list(PROFILE_SEARCH_ALIASES.get(key, []))
+
+    if q:
+        terms.append(q)
+        last = q.split()[-1].replace("'", "").strip()
+        if last:
+            terms.append(last)
+        if "-" in q:
+            terms.append(q.replace("-", " "))
+            terms.extend([x for x in q.replace("-", " ").split() if len(x) >= 3])
+
+    out = []
+    seen = set()
+    for term in terms:
+        clean = " ".join(str(term).split()).strip()
+        marker = clean.casefold()
+        if len(clean) >= 3 and marker not in seen:
+            seen.add(marker)
+            out.append(clean)
+    return out
+
+
 def _search_player_profile_free(self, query: str, season: int | None = None, team_hint: str = ""):
-    token = (query or "").split()[-1].replace("'", "").strip()
-    if len(token) < 3:
-        return None, 0
-    result = self._get("/players/profiles", {"search": token}, ttl=30 * 24 * 3600)
-    if not result.response:
+    best_player = None
+    best_score = 0.0
+
+    for search_term in _profile_search_terms(query):
+        try:
+            result = self._get(
+                "/players/profiles",
+                {"search": search_term},
+                ttl=30 * 24 * 3600,
+            )
+        except Exception:
+            continue
+
+        for item in result.response:
+            player = item.get("player") or item
+            score = self._name_score(query, player)
+
+            # Per Fitz-Jim confrontiamo anche col nome completo noto, senza
+            # abbassare la soglia di sicurezza del profilo selezionato.
+            if norm(query) == "FITZ JIM":
+                score = max(score, self._name_score("Kian Fitz-Jim", player))
+
+            if score > best_score:
+                best_score = score
+                best_player = player
+
+        # 96+ e' gia' un match molto forte: evitiamo chiamate API inutili.
+        if best_score >= 96:
+            break
+
+    if not best_player:
         return None, 0
 
-    scored = []
-    for item in result.response:
-        player = item.get("player") or item
-        score = self._name_score(query, player)
-        scored.append((score, player))
-    scored.sort(key=lambda x: x[0], reverse=True)
+    confidence = int(min(100, round(best_score)))
+    # Non memorizziamo automaticamente candidati deboli.
+    if confidence < 75:
+        return _profile_row(best_player), confidence
 
-    score, player = scored[0]
-    confidence = int(min(100, round(score)))
-    row = _profile_row(player)
+    row = _profile_row(best_player)
     self.remember_player_id(query, row, confidence)
     return row, confidence
 
@@ -159,17 +214,12 @@ def _evaluate_player_v34(*args, **kwargs):
     setattr(ev, "bonus_score", round(bscore, 1))
     bnote = bonus_note(bscore, stats, set_piece, matchup_score=mscore, matchup_note=mnote)
 
-    # La schierabilita' resta legata alla probabilita' di voto, ma per C/A il valore
-    # atteso dei bonus e la qualita' del matchup devono poter ribaltare un confronto
-    # ravvicinato. Il matchup non modifica mai p_vote: modifica solo la convenienza.
     bonus_weight = {"P": 0.02, "D": 0.11, "C": 0.23, "A": 0.34}.get(ev.role, 0.14)
     matchup_weight = {"P": 0.00, "D": 0.03, "C": 0.06, "A": 0.10}.get(ev.role, 0.04)
     delta = (bscore - 50.0) * bonus_weight + (mscore - 50.0) * matchup_weight
     ev.schierabilita = round(fantasy_engine.clamp(ev.schierabilita + delta), 1)
     ev.label = fantasy_engine.status_label(ev.schierabilita)
 
-    # Valore separato usato per ordinare i giocatori dello stesso ruolo nell'XI.
-    # Premia soprattutto attaccanti con buon contesto offensivo senza ignorare il SV.
     role_bonus_extra = {"P": 0.0, "D": 0.04, "C": 0.09, "A": 0.16}.get(ev.role, 0.06)
     role_match_extra = {"P": 0.0, "D": 0.02, "C": 0.05, "A": 0.12}.get(ev.role, 0.04)
     fantasy_upside = (
@@ -222,8 +272,6 @@ def _pick_value(p):
     selector = getattr(fantasy_engine, "_selection_value", lambda x: x.schierabilita)
     base = selector(p)
     upside = getattr(p, "fantasy_upside_score", p.schierabilita)
-    # La sicurezza del motore originale resta la base; per C/A aggiungiamo la parte
-    # di upside che non e' gia' contenuta nella semplice schierabilita'.
     role_blend = {"P": 0.0, "D": 0.30, "C": 0.55, "A": 0.80}.get(p.role, 0.45)
     return base + (upside - p.schierabilita) * role_blend
 
