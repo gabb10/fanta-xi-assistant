@@ -63,11 +63,22 @@ def _profile_row(player: dict) -> dict:
 
 
 PROFILE_SEARCH_ALIASES = {
-    # API-Football puo' essere sensibile al trattino nella ricerca. Manteniamo
-    # il nome della rosa invariato ma proviamo varianti equivalenti e verifichiamo
-    # comunque il candidato col fuzzy matching prima di accettarne l'ID.
-    "FITZ JIM": ["Kian Fitz-Jim", "Fitz-Jim", "Fitz Jim", "Fitz"],
+    # Il campo search di API-Football accetta solo caratteri alfanumerici e spazi.
+    # Manteniamo il nome della rosa invariato, ma le query inviate all'API vengono
+    # sempre sanitizzate (quindi Fitz-Jim -> Fitz Jim).
+    "FITZ JIM": ["Kian Fitz Jim", "Fitz Jim", "Fitz"],
 }
+
+
+def _api_safe_search_term(value: str) -> str:
+    """Converte un nome in una query valida per API-Football: ASCII alfanumerico + spazi."""
+    raw = unicodedata.normalize("NFKD", str(value or ""))
+    raw = "".join(c for c in raw if not unicodedata.combining(c))
+    clean = "".join(
+        c if c.isascii() and (c.isalnum() or c == " ") else " "
+        for c in raw
+    )
+    return " ".join(clean.split()).strip()
 
 
 def _profile_search_terms(query: str) -> list[str]:
@@ -77,7 +88,7 @@ def _profile_search_terms(query: str) -> list[str]:
 
     if q:
         terms.append(q)
-        last = q.split()[-1].replace("'", "").strip()
+        last = q.split()[-1].strip()
         if last:
             terms.append(last)
         if "-" in q:
@@ -87,7 +98,7 @@ def _profile_search_terms(query: str) -> list[str]:
     out = []
     seen = set()
     for term in terms:
-        clean = " ".join(str(term).split()).strip()
+        clean = _api_safe_search_term(term)
         marker = clean.casefold()
         if len(clean) >= 3 and marker not in seen:
             seen.add(marker)
