@@ -24,19 +24,16 @@ TEAM_NAMES = {
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "")
     s = "".join(c for c in s if not unicodedata.combining(c))
-    s = s.upper().replace("-", " ").replace(".", " ")
+    s = s.upper().replace("-", " ").replace(".", " ").replace("'", " ")
     return " ".join(s.split())
 
 
 def _fetch_lines(url: str) -> list[str]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/2.0; personal-use)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.1; personal-use)"}
     r = requests.get(url, headers=headers, timeout=15)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-    lines = [x.strip() for x in soup.get_text("\n").splitlines()]
-    return [x for x in lines if x]
+    return [x.strip() for x in soup.get_text("\n").splitlines() if x.strip()]
 
 
 def _best_name_match(target: str, candidates: dict[str, Any]):
@@ -46,6 +43,7 @@ def _best_name_match(target: str, candidates: dict[str, Any]):
         score = max(
             fuzz.ratio(nt, key),
             fuzz.partial_ratio(nt, key) if min(len(nt), len(key)) >= 5 else 0,
+            fuzz.token_set_ratio(nt, key),
         )
         if score > best_score:
             best_key, best_score = key, score
@@ -56,6 +54,7 @@ def _best_name_match(target: str, candidates: dict[str, Any]):
 class ProbableSource:
     percentages: dict[str, float]
     matched_names: dict[str, str]
+    teams: dict[str, str]
     updated_at: str
     ok: bool
     error: str = ""
@@ -65,8 +64,15 @@ def fetch_probable_percentages(roster_names: list[str]) -> ProbableSource:
     try:
         lines = _fetch_lines(PROBABILI_URL)
         raw: dict[str, float] = {}
+        raw_team: dict[str, str] = {}
+        current_team = ""
 
         for i, line in enumerate(lines[:-1]):
+            n = norm(line)
+            if n in TEAM_NAMES:
+                current_team = line
+                continue
+
             m = re.fullmatch(r"(\d{1,3})\s*%", lines[i + 1])
             if not m:
                 continue
@@ -74,39 +80,44 @@ def fetch_probable_percentages(roster_names: list[str]) -> ProbableSource:
                 continue
             pct = float(m.group(1))
             if 0 <= pct <= 100:
-                raw[norm(line)] = pct
+                key = norm(line)
+                raw[key] = pct
+                if current_team:
+                    raw_team[key] = current_team
 
         for line in lines:
             m = re.fullmatch(r"(.{2,45}?)\s+(\d{1,3})\s*%", line)
             if m:
                 raw[norm(m.group(1))] = float(m.group(2))
 
-        out, matched = {}, {}
+        out, matched, teams = {}, {}, {}
         for name in roster_names:
             key, score = _best_name_match(name, raw)
             if key and score >= 72:
-                out[norm(name)] = raw[key]
-                matched[norm(name)] = key
+                nk = norm(name)
+                out[nk] = raw[key]
+                matched[nk] = key
+                if raw_team.get(key):
+                    teams[nk] = raw_team[key]
 
         stamps = re.findall(
             r"Ultimo aggiornamento\s+(\d{2}/\d{2}/\d{4}\s*-\s*\d{2}:\d{2})",
-            " ".join(lines),
-            flags=re.I,
+            " ".join(lines), flags=re.I,
         )
         updated = ""
         if stamps:
             parsed = []
-            for s in stamps:
+            for stamp in stamps:
                 try:
-                    parsed.append(datetime.strptime(s.replace(" ", ""), "%d/%m/%Y-%H:%M"))
+                    parsed.append(datetime.strptime(stamp.replace(" ", ""), "%d/%m/%Y-%H:%M"))
                 except ValueError:
                     pass
             if parsed:
                 updated = max(parsed).strftime("%d/%m/%Y %H:%M")
 
-        return ProbableSource(out, matched, updated, True)
+        return ProbableSource(out, matched, teams, updated, True)
     except Exception as exc:
-        return ProbableSource({}, {}, "", False, str(exc))
+        return ProbableSource({}, {}, {}, "", False, str(exc))
 
 
 @dataclass
@@ -128,7 +139,8 @@ def fetch_set_piece_roles(roster_names: list[str]) -> SetPieceSource:
             if not key or len(key) < 2:
                 return
             rec = candidate_roles.setdefault(
-                key, {"penalty_rank": None, "set_piece_rank": None, "team": current_team}
+                key,
+                {"penalty_rank": None, "set_piece_rank": None, "team": current_team},
             )
             if current_section == "RIGORI":
                 rec["penalty_rank"] = rank
