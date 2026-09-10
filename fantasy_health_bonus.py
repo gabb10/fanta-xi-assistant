@@ -12,6 +12,7 @@ from rapidfuzz import fuzz
 UNAVAILABLE_URL = "https://www.fantacalcio.it/serie-a/indisponibili"
 INJURED_URL = "https://www.fantacalcio.it/infortunati-serie-a"
 STATS_URL = "https://www.fantacalcio.it/statistiche-serie-a/2026-27/fantacalcio/riepilogo"
+STANDINGS_URL = "https://www.fantacalcio.it/serie-a/calendario/27"
 
 TEAM_NAMES = {
     "ATALANTA", "BOLOGNA", "CAGLIARI", "COMO", "CREMONESE", "FIORENTINA",
@@ -20,18 +21,26 @@ TEAM_NAMES = {
     "UDINESE", "VENEZIA", "VERONA", "HELLAS VERONA",
 }
 
+TEAM_ALIASES = {
+    "HELLAS VERONA": "VERONA",
+    "INTERNAZIONALE": "INTER",
+    "FC INTERNAZIONALE MILANO": "INTER",
+    "AC MILAN": "MILAN",
+}
+
 
 def norm(value: str) -> str:
     value = unicodedata.normalize("NFKD", value or "")
     value = "".join(c for c in value if not unicodedata.combining(c))
     value = value.upper().replace("-", " ").replace(".", " ").replace("'", " ")
-    return " ".join(value.split())
+    value = " ".join(value.split())
+    return TEAM_ALIASES.get(value, value)
 
 
 def _get_html(url: str) -> str:
     r = requests.get(
         url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.4; personal-use)"},
+        headers={"User-Agent": "Mozilla/5.0 (compatible; FantaXIAssistant/3.4.1; personal-use)"},
         timeout=18,
     )
     r.raise_for_status()
@@ -63,11 +72,7 @@ class Availability:
 
 
 def fetch_unavailable(roster_names: list[str]) -> dict[str, Availability]:
-    """Legge infortunati e squalificati editoriali.
-
-    Lo status e' intenzionalmente forte: serve da veto rispetto a una probabile
-    formazione eventualmente non ancora allineata.
-    """
+    """Legge infortunati e squalificati editoriali con priorita' forte."""
     out: dict[str, Availability] = {}
     try:
         html = _get_html(UNAVAILABLE_URL)
@@ -98,7 +103,6 @@ def fetch_unavailable(roster_names: list[str]) -> dict[str, Availability]:
 
         matched_name = roster_norm.get(n)
         if not matched_name:
-            # Copre casi tipo Pio Esposito / Esposito P. senza rischiare match larghi.
             candidate, score = _best_roster_match(line, roster_names)
             if score < 92:
                 continue
@@ -152,7 +156,6 @@ def fetch_current_stats(roster_names: list[str]) -> dict[str, dict[str, Any]]:
         if not best_name or best_score < 88 or name_idx is None:
             continue
 
-        # Dopo il nome la tabella standard e': Sq, PV, MV, FM, Gol, GS, Rig, RP, Ass, Amm, Esp.
         tail = cells[name_idx + 1:]
         if len(tail) < 8:
             continue
@@ -177,8 +180,117 @@ def fetch_current_stats(roster_names: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def bonus_potential(role: str, stats: dict[str, Any] | None, set_piece: dict[str, Any] | None):
-    """Indice 0-100 di potenziale bonus, prudente a inizio stagione."""
+def fetch_team_table() -> dict[str, dict[str, float]]:
+    """Classifica live: G, Pt, GF, GS.
+
+    Usata solo per il contesto matchup. Il parser cerca una riga contenente una
+    squadra Serie A e poi usa la sequenza numerica standard Pt, G, V, P, S, GF,
+    GS, DR. Se la pagina cambia struttura restituisce semplicemente un dict vuoto.
+    """
+    out: dict[str, dict[str, float]] = {}
+    try:
+        soup = BeautifulSoup(_get_html(STANDINGS_URL), "html.parser")
+    except Exception:
+        return out
+
+    for tr in soup.find_all("tr"):
+        cells = [x.get_text(" ", strip=True) for x in tr.find_all(["td", "th"])]
+        if len(cells) < 7:
+            continue
+
+        team = None
+        team_idx = None
+        for i, cell in enumerate(cells[:4]):
+            nc = norm(cell)
+            if nc in TEAM_NAMES:
+                team, team_idx = nc, i
+                break
+            for candidate in TEAM_NAMES:
+                if candidate and candidate in nc and len(candidate) >= 4:
+                    team, team_idx = candidate, i
+                    break
+            if team:
+                break
+        if team is None or team_idx is None:
+            continue
+
+        nums = []
+        for cell in cells[team_idx + 1:]:
+            n = _num(cell)
+            if n is not None:
+                nums.append(n)
+        if len(nums) < 7:
+            continue
+
+        # Standard Fantacalcio: Pt, G, V, P, S, GF, GS, DR
+        pt, games, wins, draws, losses, gf, gs = nums[:7]
+        if games <= 0 or games > 38 or gf < 0 or gs < 0:
+            continue
+        out[norm(team)] = {
+            "points": pt,
+            "games": games,
+            "gf": gf,
+            "gs": gs,
+        }
+    return out
+
+
+def matchup_context(team: str, opponent: str, home_away: str,
+                    table: dict[str, dict[str, float]] | None):
+    """Ritorna score matchup 0-100 e moltiplicatore prudente circa 0.82-1.20.
+
+    Considera capacita' realizzativa della squadra, gol subiti dall'avversario e
+    casa/trasferta. I dati iniziali vengono fortemente shrinkati verso la media.
+    """
+    table = table or {}
+    t = table.get(norm(team))
+    o = table.get(norm(opponent))
+    home = norm(home_away) == "CASA"
+    away = norm(home_away) == "TRASFERTA"
+
+    if not t or not o:
+        score = 54.0 if home else 46.0 if away else 50.0
+        factor = 1.04 if home else 0.96 if away else 1.0
+        return score, factor, "solo fattore casa/trasferta"
+
+    rows = [x for x in table.values() if x.get("games", 0) > 0]
+    total_games = sum(x["games"] for x in rows)
+    league_gfpg = (sum(x["gf"] for x in rows) / total_games) if total_games else 1.35
+    league_gfpg = max(0.8, league_gfpg)
+
+    tg = max(1.0, t["games"])
+    og = max(1.0, o["games"])
+    raw_attack = (t["gf"] / tg) / league_gfpg
+    raw_opp_generosity = (o["gs"] / og) / league_gfpg
+
+    # Con 3 giornate il peso dati e' 3/(3+6)=33%: molto prudente.
+    wt = tg / (tg + 6.0)
+    wo = og / (og + 6.0)
+    attack = 1.0 + (raw_attack - 1.0) * wt
+    generosity = 1.0 + (raw_opp_generosity - 1.0) * wo
+
+    # La difficolta' generale dell'avversario entra debolmente tramite punti/partita.
+    all_ppg = [x["points"] / max(1.0, x["games"]) for x in rows]
+    avg_ppg = sum(all_ppg) / len(all_ppg) if all_ppg else 1.35
+    opp_ppg = o["points"] / og
+    strength_penalty = max(-0.08, min(0.08, (opp_ppg - avg_ppg) * 0.035))
+
+    loc = 1.07 if home else 0.93 if away else 1.0
+    raw_factor = (0.50 * attack + 0.50 * generosity) * loc * (1.0 - strength_penalty)
+    factor = max(0.82, min(1.20, raw_factor))
+    score = max(0.0, min(100.0, 50.0 + (factor - 1.0) * 220.0))
+
+    note = (
+        f"GF squadra {t['gf']:.0f}/{t['games']:.0f}, "
+        f"GS avversario {o['gs']:.0f}/{o['games']:.0f}, "
+        f"{'casa' if home else 'trasferta' if away else 'campo neutro'}"
+    )
+    return score, factor, note
+
+
+def bonus_potential(role: str, stats: dict[str, Any] | None, set_piece: dict[str, Any] | None,
+                    matchup_score: float | None = None):
+    """Indice 0-100 di potenziale bonus individuale + contesto partita."""
     role = (role or "").upper()
     stats = stats or {}
     set_piece = set_piece or {}
@@ -196,7 +308,6 @@ def bonus_potential(role: str, stats: dict[str, Any] | None, set_piece: dict[str
         ap90 = assists / pv
         fanta_delta = max(0.0, float(fm or 0) - float(mv or fm or 0)) if fm is not None else 0.0
         empirical = base + 34 * gp90 + 17 * ap90 + 5.5 * fanta_delta
-        # Campione piccolo: nelle prime giornate non facciamo dominare 1 gol isolato.
         w = min(0.60, pv / 8.0)
         score = base * (1 - w) + empirical * w
     else:
@@ -217,10 +328,16 @@ def bonus_potential(role: str, stats: dict[str, Any] | None, set_piece: dict[str
     elif set_rank == 3:
         score += 2
 
+    # Il contesto della singola partita pesa soprattutto sui giocatori da bonus.
+    if matchup_score is not None and role != "P":
+        sensitivity = {"D": 0.18, "C": 0.32, "A": 0.45}.get(role, 0.25)
+        score += (float(matchup_score) - 50.0) * sensitivity
+
     return max(0.0, min(100.0, score))
 
 
-def bonus_note(score: float, stats: dict[str, Any] | None, set_piece: dict[str, Any] | None):
+def bonus_note(score: float, stats: dict[str, Any] | None, set_piece: dict[str, Any] | None,
+               matchup_score: float | None = None, matchup_note: str = ""):
     stats = stats or {}
     set_piece = set_piece or {}
     bits = [f"bonus potenziale {score:.0f}/100"]
@@ -233,4 +350,9 @@ def bonus_note(score: float, stats: dict[str, Any] | None, set_piece: dict[str, 
         bits.append("2° rigorista")
     if set_piece.get("set_piece_rank") == 1:
         bits.append("1° sui piazzati")
+    if matchup_score is not None:
+        label = "molto favorevole" if matchup_score >= 68 else "favorevole" if matchup_score >= 57 else "difficile" if matchup_score <= 43 else "molto difficile" if matchup_score <= 32 else "neutro"
+        bits.append(f"matchup {label} {matchup_score:.0f}/100")
+        if matchup_note:
+            bits.append(matchup_note)
     return "; ".join(bits)
