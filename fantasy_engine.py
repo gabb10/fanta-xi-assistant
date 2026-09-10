@@ -14,6 +14,19 @@ FORMATIONS = {
     "5-4-1": {"P": 1, "D": 5, "C": 4, "A": 1},
 }
 
+FORMATION_BONUS = {
+    "3-4-3": 5.0,
+    "3-5-2": 2.0,
+    "4-3-3": 1.5,
+    "4-4-2": 0.0,
+    "4-5-1": -4.0,
+    "5-3-2": -5.0,
+    "5-4-1": -7.0,
+}
+
+ROLE_UPSIDE = {"P": 0.0, "D": 0.0, "C": 1.5, "A": 4.5}
+ROLE_BENCH_ENTRY = {"P": 0.02, "D": 0.20, "C": 0.34, "A": 0.42}
+
 
 def clamp(v, lo=0.0, hi=100.0):
     return max(lo, min(hi, v))
@@ -92,6 +105,32 @@ def team_prediction_score(prediction, team_id):
         return None
 
 
+def estimate_vote_probability(*, role: str, p_starter: float, apps: float, starts: float,
+                              recent: dict[str, Any], official_status: str, injured: bool) -> float:
+    role = role.upper()
+    if injured:
+        return 2.0
+    if official_status == "starter":
+        return 100.0
+
+    bench_entry = ROLE_BENCH_ENTRY.get(role, 0.30)
+    if apps > 0:
+        sub_apps = max(0.0, apps - starts)
+        historical_sub_share = clamp((sub_apps / apps) * 100) / 100
+        bench_entry = 0.60 * bench_entry + 0.40 * historical_sub_share
+
+    if recent.get("matches"):
+        matches = recent["matches"]
+        starts_recent = recent["starts"]
+        sub_appearances = max(0, matches - starts_recent)
+        recent_sub_share = sub_appearances / max(1, matches)
+        bench_entry = 0.75 * bench_entry + 0.25 * recent_sub_share
+
+    if official_status == "bench":
+        return clamp(100 * bench_entry, 1, 75)
+    return clamp(p_starter + (100 - p_starter) * bench_entry)
+
+
 @dataclass
 class PlayerEvaluation:
     name: str
@@ -103,6 +142,7 @@ class PlayerEvaluation:
     home_away: str
     kickoff: str
     p_starter: float
+    p_vote: float
     probable_source_pct: float | None
     source_consensus_pct: float | None
     source_count: int
@@ -129,28 +169,18 @@ class PlayerEvaluation:
         return asdict(self)
 
 
-def evaluate_player(
-    *,
-    name: str,
-    role: str,
-    api_player_id: int | None,
-    resolved_name: str,
-    resolve_confidence: int,
-    stat_block: dict[str, Any] | None,
-    fixture: dict[str, Any] | None,
-    injury: dict[str, Any] | None,
-    official_status: str,
-    prediction: dict[str, Any] | None,
-    probable_pct: float | None = None,
-    recent_matches: list[dict[str, Any]] | None = None,
-    set_piece_role: dict[str, Any] | None = None,
-    xg90: float | None = None,
-    xa90: float | None = None,
-    manual_note: str = "",
-    external_source_estimates: list[dict[str, Any]] | None = None,
-    news_adjustment: float = 0.0,
-    news_notes: list[str] | None = None,
-):
+def evaluate_player(*, name: str, role: str, api_player_id: int | None,
+                    resolved_name: str, resolve_confidence: int,
+                    stat_block: dict[str, Any] | None, fixture: dict[str, Any] | None,
+                    injury: dict[str, Any] | None, official_status: str,
+                    prediction: dict[str, Any] | None, probable_pct: float | None = None,
+                    recent_matches: list[dict[str, Any]] | None = None,
+                    set_piece_role: dict[str, Any] | None = None,
+                    xg90: float | None = None, xa90: float | None = None,
+                    manual_note: str = "",
+                    external_source_estimates: list[dict[str, Any]] | None = None,
+                    news_adjustment: float = 0.0,
+                    news_notes: list[str] | None = None):
     stat_block = stat_block or {}
     games = stat_block.get("games") or {}
     goals = stat_block.get("goals") or {}
@@ -186,18 +216,11 @@ def evaluate_player(
     p_starter = clamp(p_starter + float(news_adjustment or 0.0))
 
     editorial_estimates = [x["estimate"] for x in estimates if x["source"] != "Modello statistiche"]
-    source_consensus = (
-        sum(editorial_estimates) / len(editorial_estimates)
-        if editorial_estimates else None
-    )
+    source_consensus = sum(editorial_estimates) / len(editorial_estimates) if editorial_estimates else None
     source_count = len(editorial_estimates)
-    discrepancy = (
-        max(editorial_estimates) - min(editorial_estimates)
-        if len(editorial_estimates) >= 2 else 0
-    )
+    discrepancy = max(editorial_estimates) - min(editorial_estimates) if len(editorial_estimates) >= 2 else 0
     source_detail = " | ".join(
-        f'{x["source"]}: {x["estimate"]:.0f}'
-        for x in estimates if x["source"] != "Modello statistiche"
+        f'{x["source"]}: {x["estimate"]:.0f}' for x in estimates if x["source"] != "Modello statistiche"
     )
 
     recent = recent_summary(recent_matches)
@@ -212,7 +235,6 @@ def evaluate_player(
     threat = recent["threat"]
     if not recent["matches"] and apps:
         threat = clamp(38 + ((season_goals + season_assists) / apps) * 130)
-
     if xg90 is not None or xa90 is not None:
         advanced = clamp(35 + 62 * f(xg90) + 48 * f(xa90))
         threat = 0.55 * threat + 0.45 * advanced
@@ -261,19 +283,24 @@ def evaluate_player(
         p_starter = 5
 
     role = role.upper()
+    p_vote = estimate_vote_probability(
+        role=role, p_starter=p_starter, apps=apps, starts=starts, recent=recent,
+        official_status=official_status, injured=bool(injury)
+    )
+
     if role == "P":
-        score = .69*p_starter + .10*form_score + .21*fixture_score
+        score = .56*p_vote + .17*p_starter + .09*form_score + .18*fixture_score
     elif role == "D":
-        score = .59*p_starter + .14*form_score + .15*fixture_score + .08*threat + .04*set_piece_score
+        score = .41*p_vote + .14*p_starter + .13*form_score + .15*fixture_score + .11*threat + .06*set_piece_score
     elif role == "C":
-        score = .48*p_starter + .18*form_score + .10*fixture_score + .17*threat + .07*set_piece_score
+        score = .35*p_vote + .11*p_starter + .18*form_score + .09*fixture_score + .20*threat + .07*set_piece_score
     else:
-        score = .45*p_starter + .18*form_score + .13*fixture_score + .18*threat + .06*set_piece_score
+        score = .33*p_vote + .10*p_starter + .17*form_score + .12*fixture_score + .22*threat + .06*set_piece_score
 
     if injury:
         score = min(score, 10)
-    elif official_status == "bench":
-        score = min(score, 40)
+    elif official_status == "bench" and p_vote < 45:
+        score = min(score, 48)
     score = clamp(score)
 
     reasons = []
@@ -290,6 +317,7 @@ def evaluate_player(
     else:
         reasons.append("titolarità incerta")
 
+    reasons.append(f"probabilità voto {p_vote:.0f}%")
     if source_count >= 2:
         reasons.append(f"consenso di {source_count} fonti")
     if discrepancy >= 30:
@@ -323,7 +351,7 @@ def evaluate_player(
 
     if manual_note:
         reasons.append(manual_note.strip())
-    if resolve_confidence < 75:
+    if api_player_id is not None and 0 < resolve_confidence < 75:
         reasons.append("verificare abbinamento API")
 
     if official_status != "unknown":
@@ -338,37 +366,26 @@ def evaluate_player(
         confidence = "Media"
 
     return PlayerEvaluation(
-        name=name,
-        role=role,
-        api_player_id=api_player_id,
-        resolved_name=resolved_name,
-        team=team.get("name", "—"),
-        opponent=opponent,
-        home_away=home_away,
-        kickoff=kickoff,
-        p_starter=round(clamp(p_starter), 1),
+        name=name, role=role, api_player_id=api_player_id, resolved_name=resolved_name,
+        team=team.get("name", "—"), opponent=opponent, home_away=home_away, kickoff=kickoff,
+        p_starter=round(clamp(p_starter), 1), p_vote=round(clamp(p_vote), 1),
         probable_source_pct=probable_pct,
         source_consensus_pct=round(source_consensus, 1) if source_consensus is not None else None,
-        source_count=source_count,
-        source_detail=source_detail,
-        news_alerts=" | ".join((news_notes or [])[:3]),
-        official_status=official_status,
-        unavailable=unavailable,
-        season_rating=round(season_rating, 2) if season_rating is not None else None,
+        source_count=source_count, source_detail=source_detail,
+        news_alerts=" | ".join((news_notes or [])[:3]), official_status=official_status,
+        unavailable=unavailable, season_rating=round(season_rating, 2) if season_rating is not None else None,
         recent_rating=round(recent_rating, 2) if recent_rating is not None else None,
-        recent_matches=recent["matches"],
-        recent_goals=recent["goals"],
-        recent_assists=recent["assists"],
-        threat_score=round(threat, 1),
-        fixture_score=round(fixture_score, 1),
-        set_piece_score=round(set_piece_score, 1),
-        xg90=xg90,
-        xa90=xa90,
-        schierabilita=round(score, 1),
-        label=status_label(score),
-        confidence=confidence,
+        recent_matches=recent["matches"], recent_goals=recent["goals"], recent_assists=recent["assists"],
+        threat_score=round(threat, 1), fixture_score=round(fixture_score, 1),
+        set_piece_score=round(set_piece_score, 1), xg90=xg90, xa90=xa90,
+        schierabilita=round(score, 1), label=status_label(score), confidence=confidence,
         reason="; ".join(reasons),
     )
+
+
+def _selection_value(p: PlayerEvaluation) -> float:
+    zero_vote_penalty = max(0.0, 65.0 - p.p_vote) * 0.18
+    return p.schierabilita + ROLE_UPSIDE.get(p.role, 0.0) - zero_vote_penalty
 
 
 def best_lineup(players: list[PlayerEvaluation]):
@@ -378,7 +395,7 @@ def best_lineup(players: list[PlayerEvaluation]):
         for role, n in needs.items():
             pool = sorted(
                 [p for p in players if p.role == role],
-                key=lambda x: (x.schierabilita, x.p_starter),
+                key=lambda x: (_selection_value(x), x.p_vote, x.schierabilita),
                 reverse=True,
             )
             if len(pool) < n:
@@ -387,9 +404,21 @@ def best_lineup(players: list[PlayerEvaluation]):
             chosen += pool[:n]
         if not chosen:
             continue
-        total = sum(p.schierabilita for p in chosen)
-        if best is None or total > best["total"]:
-            best = {"formation": formation, "players": chosen, "total": total}
+
+        raw_total = sum(p.schierabilita for p in chosen)
+        selection_total = sum(_selection_value(p) for p in chosen)
+        vote_floor = min(p.p_vote for p in chosen)
+        safety = 0.0 if vote_floor >= 60 else -(60 - vote_floor) * 0.10
+        optimizer_score = selection_total + FORMATION_BONUS.get(formation, 0.0) + safety
+
+        if best is None or optimizer_score > best["optimizer_score"]:
+            best = {
+                "formation": formation,
+                "players": chosen,
+                "total": raw_total,
+                "optimizer_score": optimizer_score,
+                "vote_floor": vote_floor,
+            }
     return best
 
 
@@ -397,6 +426,6 @@ def bench(players: list[PlayerEvaluation], starters: list[PlayerEvaluation]):
     used = {(x.name, x.role) for x in starters}
     return sorted(
         [x for x in players if (x.name, x.role) not in used],
-        key=lambda x: (x.p_starter, x.schierabilita),
+        key=lambda x: (x.p_vote, x.schierabilita, x.p_starter),
         reverse=True,
     )
