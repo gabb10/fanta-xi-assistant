@@ -126,7 +126,6 @@ _original_evaluate_player = fantasy_engine.evaluate_player
 def _evaluate_player_v34(*args, **kwargs):
     ev = _original_evaluate_player(*args, **kwargs)
 
-    # Fixture editoriali: ricava avversario/casa-trasferta dal nome squadra.
     fixture = kwargs.get("fixture")
     if fixture:
         teams = fixture.get("teams") or {}
@@ -152,8 +151,6 @@ def _evaluate_player_v34(*args, **kwargs):
     stats = CURRENT_STATS.get(key, {})
     set_piece = kwargs.get("set_piece_role") or {}
 
-    # Matchup dinamico: forza offensiva squadra + vulnerabilita' difensiva avversario
-    # + casa/trasferta. A inizio stagione i dati vengono shrinkati verso la media.
     mscore, mfactor, mnote = matchup_context(ev.team, ev.opponent, ev.home_away, TEAM_TABLE)
     setattr(ev, "matchup_bonus_score", round(mscore, 1))
     setattr(ev, "matchup_bonus_factor", round(mfactor, 3))
@@ -162,19 +159,32 @@ def _evaluate_player_v34(*args, **kwargs):
     setattr(ev, "bonus_score", round(bscore, 1))
     bnote = bonus_note(bscore, stats, set_piece, matchup_score=mscore, matchup_note=mnote)
 
-    # Il bonus incide di piu' sui ruoli offensivi. Per gli attaccanti il matchup
-    # deve poter spostare davvero un ballottaggio, senza pero' ignorare il rischio SV.
-    bonus_weight = {"P": 0.02, "D": 0.10, "C": 0.19, "A": 0.25}.get(ev.role, 0.12)
-    delta = (bscore - 50.0) * bonus_weight
+    # La schierabilita' resta legata alla probabilita' di voto, ma per C/A il valore
+    # atteso dei bonus e la qualita' del matchup devono poter ribaltare un confronto
+    # ravvicinato. Il matchup non modifica mai p_vote: modifica solo la convenienza.
+    bonus_weight = {"P": 0.02, "D": 0.11, "C": 0.23, "A": 0.34}.get(ev.role, 0.14)
+    matchup_weight = {"P": 0.00, "D": 0.03, "C": 0.06, "A": 0.10}.get(ev.role, 0.04)
+    delta = (bscore - 50.0) * bonus_weight + (mscore - 50.0) * matchup_weight
     ev.schierabilita = round(fantasy_engine.clamp(ev.schierabilita + delta), 1)
     ev.label = fantasy_engine.status_label(ev.schierabilita)
+
+    # Valore separato usato per ordinare i giocatori dello stesso ruolo nell'XI.
+    # Premia soprattutto attaccanti con buon contesto offensivo senza ignorare il SV.
+    role_bonus_extra = {"P": 0.0, "D": 0.04, "C": 0.09, "A": 0.16}.get(ev.role, 0.06)
+    role_match_extra = {"P": 0.0, "D": 0.02, "C": 0.05, "A": 0.12}.get(ev.role, 0.04)
+    fantasy_upside = (
+        ev.schierabilita
+        + (bscore - 50.0) * role_bonus_extra
+        + (mscore - 50.0) * role_match_extra
+    )
+    setattr(ev, "fantasy_upside_score", round(fantasy_upside, 2))
+
     ev.reason = (ev.reason + "; " if ev.reason else "") + bnote
     ev.source_detail = (
         (ev.source_detail + " | " if ev.source_detail else "")
         + f"Bonus {bscore:.0f}/100 · Matchup {mscore:.0f}/100"
     )
 
-    # Infortunio/squalifica editoriale = veto forte, prevale su probabili e bonus.
     unavailable = EDITORIAL_UNAVAILABLE.get(key)
     if unavailable:
         status = unavailable.status.lower()
@@ -188,6 +198,7 @@ def _evaluate_player_v34(*args, **kwargs):
             ev.p_starter = min(ev.p_starter, 1.0)
             ev.p_vote = min(ev.p_vote, 2.0)
             ev.schierabilita = min(ev.schierabilita, 5.0)
+        setattr(ev, "fantasy_upside_score", ev.schierabilita)
         ev.label = "⛔ Da evitare"
         ev.reason = f"⛔ {status.upper()} — {reason}; " + ev.reason
         ev.source_detail = (
@@ -207,20 +218,29 @@ fantasy_engine.evaluate_player = _evaluate_player_v34
 _original_best_lineup = fantasy_engine.best_lineup
 
 
+def _pick_value(p):
+    selector = getattr(fantasy_engine, "_selection_value", lambda x: x.schierabilita)
+    base = selector(p)
+    upside = getattr(p, "fantasy_upside_score", p.schierabilita)
+    # La sicurezza del motore originale resta la base; per C/A aggiungiamo la parte
+    # di upside che non e' gia' contenuta nella semplice schierabilita'.
+    role_blend = {"P": 0.0, "D": 0.30, "C": 0.55, "A": 0.80}.get(p.role, 0.45)
+    return base + (upside - p.schierabilita) * role_blend
+
+
 def _pick_formation(players, formation: str):
     needs = fantasy_engine.FORMATIONS[formation]
-    selector = getattr(fantasy_engine, "_selection_value", lambda p: p.schierabilita)
     chosen = []
     for role, n in needs.items():
         pool = sorted(
             [p for p in players if p.role == role],
             key=lambda p: (
-                selector(p),
-                p.p_vote,
+                _pick_value(p),
+                getattr(p, "fantasy_upside_score", p.schierabilita),
                 getattr(p, "bonus_score", 50),
                 getattr(p, "matchup_bonus_score", 50),
+                p.p_vote,
                 p.schierabilita,
-                p.p_starter,
             ),
             reverse=True,
         )
@@ -232,7 +252,7 @@ def _pick_formation(players, formation: str):
         "formation": formation,
         "players": chosen,
         "total": sum(p.schierabilita for p in chosen),
-        "optimizer_score": sum(selector(p) for p in chosen),
+        "optimizer_score": sum(_pick_value(p) for p in chosen),
         "vote_floor": min(p.p_vote for p in chosen),
         "expected_votes": sum(p.p_vote for p in chosen) / 100.0,
     }
