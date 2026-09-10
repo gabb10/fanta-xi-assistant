@@ -1,1 +1,1 @@
-# fanta-xi-assistant
+# fanta-xi-assistan
